@@ -1,0 +1,320 @@
+---
+title: "2024 MD eviction analysis"
+author: "Sandhya Kajeepeta"
+date: "2024-12-09"
+output: html_document
+---
+
+```{r load packages,echo=FALSE, results=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(sf)
+library(readxl)
+library(MASS)
+library(pscl)
+```
+
+# Executed evictions
+## Total executed evictions
+```{r load eviction data, echo=FALSE, warning=FALSE, message=FALSE}
+evic <- read_csv("./2024 data/District_Court_of_Maryland_Eviction_Case_Data.csv")
+#Source: https://app.powerbigov.us/view?r=eyJrIjoiYWI1Yzg0YjYtNDFkZS00MDUyLThlMDctYmE1ZjY5MGI0MWJhIiwidCI6IjdkM2I4ZDAwLWY5YmUtNDZlNy05NDYwLTRlZjJkOGY3MzE0OSJ9&pageName=ReportSection 
+
+#convert dates to datetime vars
+evic$`Event Date` <- as.POSIXct(evic$`Event Date`, format="%m/%d/%Y")
+evic$`Evicted Date` <- as.POSIXct(evic$`Evicted Date`, format="%m/%d/%Y")
+
+#restrict to evictions in Oct 2023-Sep 2024 and group by zip code
+#Time period = Oct 2023 - Sep 2024
+df1 <- evic %>% filter(`Event Type`=="Warrant of Restitution - Return of Service - Evicted" & `Event Date`>"2023-9-30" & `Event Date`<"2024-10-01") %>% group_by(`Tenant ZIP Code`) %>% summarize(count=n())
+colnames(df1) <- c("ZIP", "evictions")
+```
+
+```{r load housing data by zip, echo=FALSE, warning=FALSE, message=FALSE}
+acs <- read_csv("./Data/ACS_5Y_2022.csv")
+#Source: ACS 5-year estimates 2022: https://data.census.gov/table/ACSST5Y2022.S2502?q=S2502&g=040XX00US24$8600000&tp=true 
+
+#select number of renter-occupied housing units and number of Black renter-occupied housing units
+acs <- acs %>% dplyr::select(NAME, S2502_C05_001E, S2502_C05_003E)
+
+#clean up vars
+colnames(acs) <- c("ZIP","renter_units","black_renter_units")
+acs$ZIP <- as.numeric(substring(acs$ZIP, 7, 11))
+```
+
+```{r join data, echo=FALSE, warning=FALSE, message=FALSE}
+df1 <- acs %>% left_join(df1, by="ZIP")
+
+#drop zip codes with 0 rental units or missing ACS data
+df1 <- df1 %>% filter(renter_units > 0)
+
+#if no eviction data, assume that there were 0 evictions
+df1$evictions <- ifelse(is.na(df1$evictions), 0, df1$evictions)
+
+#create vars of interest
+df1$perc_black_rent <- df1$black_renter_units/df1$renter_units*10
+df1$evic_rate <- df1$evictions/df1$renter_units*100
+```
+
+```{r plot vars zip, echo=FALSE, results=FALSE, warning=FALSE, fig.show='hide'}
+plot <-ggplot(df1, mapping=aes(x=perc_black_rent, y=evic_rate)) + geom_point()
+plot
+
+hist(df1$evic_rate)
+hist(df1$perc_black_rent)
+
+#drop zip codes with fewer than 50 rental units
+df1 <- df1 %>% filter(renter_units >= 50)
+```
+
+```{r poisson or neg binomial zip, echo=FALSE, results=FALSE, warning=FALSE, fig.show='hide'}
+p_model <- glm(formula=evictions~perc_black_rent + offset(log(renter_units)), data=df1, family="poisson")
+nb_model <- glm.nb(formula=evictions~perc_black_rent + offset(log(renter_units)), data=df1)
+
+#Residual plot for Poisson regression
+p_res <- resid(p_model)
+plot(fitted(p_model), p_res, col='steelblue', pch=16,
+     xlab='Predicted Offers', ylab='Standardized Residuals', main='Poisson')
+abline(0,0)
+
+#Residual plot for negative binomial regression 
+nb_res <- resid(nb_model)
+plot(fitted(nb_model), nb_res, col='steelblue', pch=16,
+     xlab='Predicted Offers', ylab='Standardized Residuals', main='Negative Binomial')
+abline(0,0)
+
+#Residuals for negative binomial plot are much smaller, Poisson residuals extend all the way to 25 - suggests that negative binomial is a better fit than Poisson
+
+pchisq(2 * (logLik(nb_model) - logLik(p_model)), df = 1, lower.tail = FALSE)
+
+#Negative binomial offers significantly better fit
+```
+<iframe title="Rate of executed evictions by ZIP code (Oct 2023 - Sep 2024)" aria-label="Map" id="datawrapper-chart-jdVQK" src="https://datawrapper.dwcdn.net/jdVQK/1/" scrolling="no" frameborder="0" style="width: 0; min-width: 100% !important; border: none;" height="485" data-external="1"></iframe><script type="text/javascript">!function(){"use strict";window.addEventListener("message",(function(a){if(void 0!==a.data["datawrapper-height"]){var e=document.querySelectorAll("iframe");for(var t in a.data["datawrapper-height"])for(var r=0;r<e.length;r++)if(e[r].contentWindow===a.source){var i=a.data["datawrapper-height"][t]+"px";e[r].style.height=i}}}))}();
+</script>
+
+<iframe title="Black renters as percentage of renter population by ZIP code (2022)" aria-label="Map" id="datawrapper-chart-wE0kS" src="https://datawrapper.dwcdn.net/wE0kS/1/" scrolling="no" frameborder="0" style="width: 0; min-width: 100% !important; border: none;" height="499" data-external="1"></iframe><script type="text/javascript">!function(){"use strict";window.addEventListener("message",(function(a){if(void 0!==a.data["datawrapper-height"]){var e=document.querySelectorAll("iframe");for(var t in a.data["datawrapper-height"])for(var r=0;r<e.length;r++)if(e[r].contentWindow===a.source){var i=a.data["datawrapper-height"][t]+"px";e[r].style.height=i}}}))}();
+</script>
+
+```{r analysis zip, echo=FALSE, warning=FALSE, message=FALSE}
+m <- glm.nb(formula=evictions~perc_black_rent + offset(log(renter_units)), data=df1)
+print("Eviction rate")
+est <- exp(cbind(Estimate = coef(m), confint(m)))
+kable(est, "pipe")
+
+```
+For ZIP codes in Maryland with 50 or more rental units, ZIP codes with a higher percentage of Black renters face a higher rate of total evictions.
+
+A 10-percentage-point increase in the percent of Black renters in a ZIP code is associated with a 14% increase in the rate of evictions.
+
+## Executed holdover evictions
+```{r holdover eviction data, echo=FALSE, warning=FALSE, message=FALSE}
+#restrict to evictions in Oct 2023 to Sep 2024, restrict to holdover evics, and group by zip code
+#Time period = Oct 2023 - Sep 2024
+df2 <- evic %>% filter(`Event Type`=="Warrant of Restitution - Return of Service - Evicted" & `Event Date`>"2023-9-30" & `Event Date`<"2024-10-01"& `Case Type`=="Tenant Holding Over") %>% group_by(`Tenant ZIP Code`) %>% summarize(count=n())
+colnames(df2) <- c("ZIP", "holdover_evictions")
+```
+
+```{r join holdover data, echo=FALSE, warning=FALSE, message=FALSE}
+df2 <- acs %>% left_join(df2, by="ZIP")
+
+#drop zip codes with 0 rental units or missing ACS data
+df2 <- df2 %>% filter(renter_units > 0)
+
+#if no eviction data, assume that there were 0 evictions
+df2$holdover_evictions <- ifelse(is.na(df2$holdover_evictions), 0, df2$holdover_evictions)
+
+#create vars of interest
+df2$perc_black_rent <- df2$black_renter_units/df2$renter_units*10
+df2$evic_rate <- df2$holdover_evictions/df2$renter_units*100
+```
+
+```{r plot vars zip holdover, echo=FALSE, results=FALSE, warning=FALSE, fig.show='hide'}
+plot <-ggplot(df2, mapping=aes(x=perc_black_rent, y=evic_rate)) + geom_point()
+plot
+
+hist(df2$evic_rate)
+hist(df2$perc_black_rent)
+
+#drop zip codes with fewer than 50 rental units
+df2 <- df2 %>% filter(renter_units >= 50)
+```
+
+```{r poisson or neg binomial zip holdover, echo=FALSE, results=FALSE, warning=FALSE, fig.show='hide'}
+p_model <- glm(formula=holdover_evictions~perc_black_rent + offset(log(renter_units)), data=df2, family="poisson")
+nb_model <- glm.nb(formula=holdover_evictions~perc_black_rent + offset(log(renter_units)), data=df2)
+
+#Residual plot for Poisson regression
+p_res <- resid(p_model)
+plot(fitted(p_model), p_res, col='steelblue', pch=16,
+     xlab='Predicted Offers', ylab='Standardized Residuals', main='Poisson')
+abline(0,0)
+
+#Residual plot for negative binomial regression 
+nb_res <- resid(nb_model)
+plot(fitted(nb_model), nb_res, col='steelblue', pch=16,
+     xlab='Predicted Offers', ylab='Standardized Residuals', main='Negative Binomial')
+abline(0,0)
+
+#Residuals for negative binomial plot are smaller - suggests that negative binomial is a better fit than Poisson
+
+pchisq(2 * (logLik(nb_model) - logLik(p_model)), df = 1, lower.tail = FALSE)
+
+#Negative binomial offers significantly better fit
+```
+
+```{r analysis zip holdover, echo=FALSE, warning=FALSE, message=FALSE}
+m <- glm.nb(formula=holdover_evictions~perc_black_rent + offset(log(renter_units)), data=df2)
+print("Holdover eviction rate")
+est <- exp(cbind(Estimate = coef(m), confint(m)))
+kable(est, "pipe")
+
+```
+For ZIP codes in Maryland with 50 or more rental units, ZIP codes with a higher percentage of Black renters face a higher rate of holdover evictions.
+
+A 10-percentage-point increase in the percent of Black renters in a ZIP code is associated with a 10% increase in the rate of holdover evictions, but this effect is not statistically significant.
+
+# Warrants of restitution
+## Total warrants of restitution
+
+```{r warrant data, echo=FALSE, warning=FALSE, message=FALSE}
+#restrict to warrants in Oct 2023 to Sep 2024 and group by zip code
+#Time period = Oct 2023 - Sep 2024
+df3 <- evic %>% filter(`Event Type`=="Petition - For Warrant of Restitution Filed" & `Event Date`>"2023-9-30" & `Event Date`<"2024-10-01") %>% group_by(`Tenant ZIP Code`) %>% summarize(count=n())
+colnames(df3) <- c("ZIP", "warrants")
+```
+
+```{r join warrant data, echo=FALSE, warning=FALSE, message=FALSE}
+df3 <- acs %>% left_join(df3, by="ZIP")
+
+#drop zip codes with 0 rental units or missing ACS data
+df3 <- df3 %>% filter(renter_units > 0)
+
+#if no eviction data, assume that there were 0 warrants
+df3$warrants <- ifelse(is.na(df3$warrants), 0, df3$warrants)
+
+#create vars of interest
+df3$perc_black_rent <- df3$black_renter_units/df3$renter_units*10
+df3$evic_rate <- df3$warrants/df3$renter_units*100
+```
+
+```{r plot vars zip warrant, echo=FALSE, results=FALSE, warning=FALSE, fig.show='hide'}
+plot <-ggplot(df3, mapping=aes(x=perc_black_rent, y=evic_rate)) + geom_point()
+plot
+
+hist(df3$evic_rate)
+hist(df3$perc_black_rent)
+
+#drop zip codes with fewer than 50 rental units
+df3 <- df3 %>% filter(renter_units >= 50)
+```
+
+```{r poisson or neg binomial zip warrant, echo=FALSE, results=FALSE, warning=FALSE, fig.show='hide'}
+p_model <- glm(formula=warrants~perc_black_rent + offset(log(renter_units)), data=df3, family="poisson")
+nb_model <- glm.nb(formula=warrants~perc_black_rent + offset(log(renter_units)), data=df3)
+
+#Residual plot for Poisson regression
+p_res <- resid(p_model)
+plot(fitted(p_model), p_res, col='steelblue', pch=16,
+     xlab='Predicted Offers', ylab='Standardized Residuals', main='Poisson')
+abline(0,0)
+
+#Residual plot for negative binomial regression 
+nb_res <- resid(nb_model)
+plot(fitted(nb_model), nb_res, col='steelblue', pch=16,
+     xlab='Predicted Offers', ylab='Standardized Residuals', main='Negative Binomial')
+abline(0,0)
+
+#Residuals for negative binomial plot are smaller, Poisson residuals extend all the way to 60 - suggests that negative binomial is a better fit than Poisson
+
+pchisq(2 * (logLik(nb_model) - logLik(p_model)), df = 1, lower.tail = FALSE)
+
+#Negative binomial offers significantly better fit
+```
+
+```{r analysis zip warrant, echo=FALSE, warning=FALSE, message=FALSE}
+m <- glm.nb(formula=warrants~perc_black_rent + offset(log(renter_units)), data=df3)
+print("Warrants of restitution filing rate")
+est <- exp(cbind(Estimate = coef(m), confint(m)))
+kable(est, "pipe")
+
+```
+For ZIP codes in Maryland with 50 or more rental units, ZIP codes with a higher percentage of Black renters face a higher rate of filings of warrants of restitution.
+
+A 10-percentage-point increase in the percent of Black renters in a ZIP code is associated with a 35% increase in the rate of filings of warrants of restitution.
+
+## Warrants of restitution for holdover evictions
+```{r holdover warrant data, echo=FALSE, warning=FALSE, message=FALSE}
+#restrict to warrants in Oct 2023 to Sep 2024, restrict to holdover, and group by zip code
+#Time period = Oct 2023 - Sep 2024
+df4 <- evic %>% filter(`Event Type`=="Petition - For Warrant of Restitution Filed" & `Event Date`>"2023-9-30" & `Event Date`<"2024-10-01" & `Case Type`=="Tenant Holding Over") %>% group_by(`Tenant ZIP Code`) %>% summarize(count=n())
+colnames(df4) <- c("ZIP", "holdover_warrants")
+```
+
+```{r join holdover warrant data, echo=FALSE, warning=FALSE, message=FALSE}
+df4 <- acs %>% left_join(df4, by="ZIP")
+
+#drop zip codes with 0 rental units or missing ACS data
+df4 <- df4 %>% filter(renter_units > 0)
+
+#if no eviction data, assume that there were 0 holdover warrants
+df4$holdover_warrants <- ifelse(is.na(df4$holdover_warrants), 0, df4$holdover_warrants)
+
+#create vars of interest
+df4$perc_black_rent <- df4$black_renter_units/df4$renter_units*10
+df4$evic_rate <- df4$holdover_warrants/df4$renter_units*100
+```
+
+```{r plot vars zip holdover warrant, echo=FALSE, results=FALSE, warning=FALSE, fig.show='hide'}
+plot <-ggplot(df4, mapping=aes(x=perc_black_rent, y=evic_rate)) + geom_point()
+plot
+
+hist(df4$evic_rate)
+hist(df4$perc_black_rent)
+
+#drop zip codes with fewer than 50 rental units
+df4 <- df4 %>% filter(renter_units >= 50)
+```
+
+```{r poisson or neg binomial zip holdover warrant, echo=FALSE, results=FALSE, warning=FALSE, fig.show='hide'}
+p_model <- glm(formula=holdover_warrants~perc_black_rent + offset(log(renter_units)), data=df4, family="poisson")
+nb_model <- glm.nb(formula=holdover_warrants~perc_black_rent + offset(log(renter_units)), data=df4)
+
+#Residual plot for Poisson regression
+p_res <- resid(p_model)
+plot(fitted(p_model), p_res, col='steelblue', pch=16,
+     xlab='Predicted Offers', ylab='Standardized Residuals', main='Poisson')
+abline(0,0)
+
+#Residual plot for negative binomial regression 
+nb_res <- resid(nb_model)
+plot(fitted(nb_model), nb_res, col='steelblue', pch=16,
+     xlab='Predicted Offers', ylab='Standardized Residuals', main='Negative Binomial')
+abline(0,0)
+
+#Residuals for negative binomial plot are smaller, Poisson residuals extend all the way to 10 - suggests that negative binomial is a better fit than Poisson
+
+pchisq(2 * (logLik(nb_model) - logLik(p_model)), df = 1, lower.tail = FALSE)
+
+#Negative binomial offers significantly better fit
+```
+
+```{r analysis zip warrant holdover, echo=FALSE, warning=FALSE, message=FALSE}
+m <- glm.nb(formula=holdover_warrants~perc_black_rent + offset(log(renter_units)), data=df4)
+print("Warrants of restitution filing rate for holdover evictions")
+est <- exp(cbind(Estimate = coef(m), confint(m)))
+kable(est, "pipe")
+
+```
+For ZIP codes in Maryland with 50 or more rental units, ZIP codes with a higher percentage of Black renters face a higher rate of filings of warrants of restitution for holdover evictions.
+
+A 10-percentage-point increase in the percent of Black renters in a ZIP code is associated with a 14% increase in the rate of filings of warrants of restitution for holdover evictions.
+
+```{r exports datasets for maps, echo=FALSE, warning=FALSE, message=FALSE}
+write.csv(df1, "./Map Data/2024 map data/total executed evictions.csv")
+write.csv(df2, "./Map Data/2024 map data/executed holdover evictions.csv")
+write.csv(df3, "./Map Data/2024 map data/warrants of restitution.csv")
+write.csv(df4, "./Map Data/2024 map data/holdover warrants.csv")
+
+```
